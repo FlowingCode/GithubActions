@@ -1,0 +1,37 @@
+#Check commits against Flowing Code Conventional Commits guidelines
+#and verify that the Semantic Versioning change level is consistent with the version in POM
+
+name: Check Commits
+
+on:
+  workflow_call:
+
+jobs:
+  check-commits:
+    runs-on: ubuntu-latest
+    steps:
+    
+    - uses: actions/checkout@v3
+    
+    - uses: javier-godoy/action-conventional-commits@master
+    
+    - name: Get version
+      run: echo "VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)" >> $GITHUB_ENV
+    
+    - name: Check snapshot version
+      if: ${{ !endsWith( env.VERSION , '-SNAPSHOT' ) }}
+      uses: actions/github-script@v3
+      with: 
+          script: core.setFailed('Version is not SNAPSHOT')
+    
+    - name: Fail on required major version
+      if: ${{ fromJSON(env.SEMVER_LEVEL)==3 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0.0-SNAPSHOT' ) }}
+      uses: actions/github-script@v6
+      with: 
+          script: core.setFailed("Version ${{ env.VERSION }} cannot contain breaking changes.")
+          
+    - name: Fail on required minor version
+      if: ${{ fromJSON(env.SEMVER_LEVEL)==2 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0-SNAPSHOT' ) }}
+      uses: actions/github-script@v6
+      with: 
+          script: core.setFailed("Version ${{ env.VERSION }} cannot contain new features")
