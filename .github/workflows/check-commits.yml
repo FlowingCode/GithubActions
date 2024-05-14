@@ -16,7 +16,7 @@ jobs:
     - uses: FlowingCode/action-conventional-commits@master
     
     - name: Get version
-      run: echo "VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)" >> $GITHUB_ENV
+      run: echo "VERSION=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml")" >> $GITHUB_ENV && cat $GITHUB_ENV | grep VERSION=
     
     - name: Check snapshot version
       if: ${{ !endsWith( env.VERSION , '-SNAPSHOT' ) }}
