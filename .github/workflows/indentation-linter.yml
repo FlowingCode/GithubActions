@@ -1,0 +1,172 @@
+#Validates indentation for every individual commit within a pull request.
+name: 'Indentation Linter'
+
+on:
+  workflow_call:
+  
+jobs:
+  indentation-linter:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Commit Processor
+        shell: bash
+        run: |
+
+          # Load file content from a specific git object into a Bash array
+          load_file_to_array() {
+            local commit="$1"
+            local file="$2"
+            local -n ref_lines_arr=$3            
+            readarray -t ref_lines_arr < <(git show "$commit:$file" 2>/dev/null)
+          }
+          
+          # Load prefixes into a global array
+          load_prefixes() {
+            local commit="$1"
+            local file="$2"
+            local -n ref_array=$3
+            
+            # Extract all leading whitespace, sort them, and keep unique ones
+            while read -r prefix; do
+              ref_map["$prefix"]=1
+            done < <(git show "$commit:$file" 2>/dev/null | sed -n 's/^\([[:space:]]\+\).*/\1/p' | sort -u)
+          }
+          
+          # Check if a prefix is consistent with ANY approved prefix
+          is_consistent() {
+            local candidate="$1"
+            local -n ref_map=$2
+            
+            # If map is empty (new file, first line), it's always consistent
+            if [[ ${#ref_map[@]} -eq 0 ]]; then
+              return 0
+            fi
+            
+            # Rule: candidate starts with approved OR approved starts with candidate
+            for approved in "${!ref_map[@]}"; do
+              if [[ "$candidate" == "$approved"* ]] || [[ "$approved" == "$candidate"* ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          validate_existing_file() {
+            local PARENT=$1
+            local CURRENT=$2
+            local OLD_FILE=$3
+            local NEW_FILE=$4
+            local STATUS=0
+            
+            declare -A approved_prefixes
+            load_prefixes "$PARENT" "$OLD_FILE" approved_prefixes
+
+            local -a file_lines
+            load_file_to_array "$CURRENT" "$NEW_FILE" file_lines
+            
+            local MOD_LINES=$(git diff -U0 "$PARENT" "$CURRENT" -- "$OLD_FILE" "$NEW_FILE" | grep '^@@' | grep -oP '\+\K[0-9]+(,[0-9]+)?')
+            for RANGE in $MOD_LINES; do
+              local START=$(echo "$RANGE" | cut -d',' -f1)
+              local COUNT=$(echo "$RANGE" | cut -s -d',' -f2)
+              [ -z "$COUNT" ] && COUNT=1
+              local END=$((START + COUNT - 1))
+              for (( i=START; i<=END; i++ )); do
+                local line_content="${file_lines[$((i-1))]}"
+                if [[ "$line_content" =~ ^([ $'\t']+) ]]; then
+                  local new_sig="${BASH_REMATCH[1]}"
+                  if [[ -z "${approved_prefixes["$new_sig"]}" ]]; then
+                    echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $(echo -n "$new_sig" | tr ' \t' 'ST')"
+                    STATUS=1
+                  fi
+                fi
+              done
+            done
+            return $STATUS
+          }
+
+          validate_new_file() {
+            local commit=$1
+            local file=$2
+            local STATUS=0
+              
+            declare -A approved_prefixes
+
+            local -a file_lines
+            load_file_to_array "$commit" "$file" file_lines
+            
+            local line_num=0
+            for line in "${file_lines[@]}"; do
+              ((line_num++))
+              if [[ "$line" =~ ^([ $'\t']+) ]]; then
+                local current_sig="${BASH_REMATCH[1]}"
+                if is_consistent "$current_sig" approved_prefixes; then
+                  approved_prefixes["$current_sig"]=1
+                else
+                  echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $(echo -n "$current_sig" | tr ' \t' 'ST')"
+                  STATUS=1
+                fi
+              fi
+            done
+            return $STATUS
+          }
+
+          process_commit_changes() {
+            local commit_sha="$1"
+            local parent_sha="$commit_sha^"
+            local ext_regex="$2"
+            local -i commit_status=0
+            
+            while IFS= read -r -d '' status; do
+              IFS= read -r -d '' file1
+              case "$status" in
+              D*) # Deleted
+                  continue
+                  ;;
+              A*) # Added
+                  if [[ "$file1" =~ $ext_regex ]]; then
+                    echo "  [Added] $file1"
+                    validate_new_file "$commit_sha" "$file1" || commit_status=1
+                  fi
+                  ;;
+              R*) # Renamed (file1 is old path, file2 is new path)
+                  IFS= read -r -d '' file2
+                  if [[ "$file2" =~ $ext_regex ]]; then
+                    echo "  [Renamed] $file1 -> $file2"
+                    validate_existing_file "$parent_sha" "$commit_sha" "$file1" "$file2" || commit_status=1
+                  fi
+                  ;;
+               *) # Modified (M), Copied (C), etc.
+                  if [[ "$file1" =~ $ext_regex ]]; then
+                    echo "  [Modified] $file1"
+                    validate_existing_file "$parent_sha" "$commit_sha" "$file1" "$file1" || commit_status=1
+                  fi
+                  ;;
+              esac
+            done < <(git diff-tree --no-commit-id --name-status -r -z -M "$commit_sha")
+          
+            return "$commit_status"
+          }
+
+          EXTENSIONS='.*'
+          TARGET_BRANCH="${{ github.base_ref }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          COMMITS=$(git rev-list --reverse origin/$TARGET_BRANCH..$HEAD)
+          FINAL_EXIT=0
+          
+          echo "----------------------------------------------------"
+          for COMMIT in $COMMITS; do
+            MESSAGE=$(git log -1 --pretty=%B $COMMIT)                    
+            echo
+            echo "Processing Commit: $COMMIT $MESSAGE"
+            if ! process_commit_changes "$COMMIT" "$EXTENSIONS"; then
+              FINAL_EXIT=1
+            fi
+          done          
+          echo "----------------------------------------------------"
+          exit "$FINAL_EXIT"
