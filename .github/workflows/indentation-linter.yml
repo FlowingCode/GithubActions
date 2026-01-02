@@ -165,8 +165,12 @@ jobs:
           FINAL_EXIT=0
 
           INPUT_EXT="${{ inputs.extensions }}"
-          FORMATTED_EXT=$(echo "$INPUT_EXT" | sed 's/,/|/g')
-          EXT_REGEX="\.($FORMATTED_EXT)$"
+          if [[ "$INPUT_EXT" == "*" ]]; then
+            EXT_REGEX=".*"
+          else
+            FORMATTED_EXT=$(echo "$INPUT_EXT" | sed 's/,/|/g')
+            EXT_REGEX="\.($FORMATTED_EXT)$"
+          fi
           
           echo "----------------------------------------------------"
           for COMMIT in $COMMITS; do
