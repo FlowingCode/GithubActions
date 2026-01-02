@@ -8,7 +8,7 @@ on:
         description: 'Comma-separated list of extensions to lint (e.g., "js,ts,py")'
         required: false
         type: string
-        default: 'js,java,ts,tsx,xml,py,c,cpp,h,hpp,sh,bash,yml,yaml,json,md,sql'
+        default: '*'
         
 jobs:
   indentation-linter:
