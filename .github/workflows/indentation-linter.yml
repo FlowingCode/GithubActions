@@ -5,7 +5,7 @@ on:
   workflow_call:
     inputs:
       extensions:
-        description: 'Comma-separated list of extensions to lint (e.g., "js,ts,py")'
+        description: 'Comma-separated list of extensions to lint (e.g., "js,ts,java")'
         required: false
         type: string
         default: '*'
@@ -70,9 +70,20 @@ jobs:
             local NEW_FILE=$4
             local STATUS=0
             
-            declare -A approved_prefixes
+            declare -A approved_prefixes            
             load_prefixes "$PARENT" "$OLD_FILE" approved_prefixes
 
+            local ENFORCE_STRICT_SPACES=false
+            if [[ "$NEW_FILE" =~ $SPACE_ONLY_EXT_REGEX ]]; then
+              ENFORCE_STRICT_SPACES=true
+              for prefix in "${!approved_prefixes[@]}"; do
+                if [[ "$prefix" == *$'\t'* ]]; then
+                  ENFORCE_STRICT_SPACES=false
+                  break
+                fi
+              done
+            fi
+  
             local -a file_lines
             load_file_to_array "$CURRENT" "$NEW_FILE" file_lines
             
@@ -86,7 +97,10 @@ jobs:
                 local line_content="${file_lines[$((i-1))]}"
                 if [[ "$line_content" =~ ^([ $'\t']+) ]]; then
                   local new_sig="${BASH_REMATCH[1]}"
-                  if [[ -z "${approved_prefixes["$new_sig"]}" ]]; then
+                  if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$new_sig" == *$'\t'* ]]; then
+                    echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden because this file has a clean space-only history."
+                    STATUS=1
+                  elif [[ -z "${approved_prefixes["$new_sig"]}" ]]; then
                     echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $(echo -n "$new_sig" | tr ' \t' 'ST')"
                     STATUS=1
                   fi
@@ -171,6 +185,8 @@ jobs:
             FORMATTED_EXT=$(echo "$INPUT_EXT" | sed 's/,/|/g')
             EXT_REGEX="\.($FORMATTED_EXT)$"
           fi
+
+          SPACE_ONLY_EXT_REGEX='\.java$'
           
           echo "----------------------------------------------------"
           for COMMIT in $COMMITS; do
