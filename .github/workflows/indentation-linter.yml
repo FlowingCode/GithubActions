@@ -3,7 +3,13 @@ name: 'Indentation Linter'
 
 on:
   workflow_call:
-  
+    inputs:
+      extensions:
+        description: 'Comma-separated list of extensions to lint (e.g., "js,ts,py")'
+        required: false
+        type: string
+        default: 'js,java,ts,tsx,xml,py,c,cpp,h,hpp,sh,bash,yml,yaml,json,md,sql'
+        
 jobs:
   indentation-linter:
     runs-on: ubuntu-latest
@@ -152,19 +158,22 @@ jobs:
           
             return "$commit_status"
           }
-
-          EXTENSIONS='.*'
+          
           TARGET_BRANCH="${{ github.base_ref }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
           COMMITS=$(git rev-list --reverse origin/$TARGET_BRANCH..$HEAD)
           FINAL_EXIT=0
+
+          INPUT_EXT="${{ inputs.extensions }}"
+          FORMATTED_EXT=$(echo "$INPUT_EXT" | sed 's/,/|/g')
+          EXT_REGEX="\.($FORMATTED_EXT)$"
           
           echo "----------------------------------------------------"
           for COMMIT in $COMMITS; do
             MESSAGE=$(git log -1 --pretty=%B $COMMIT)                    
             echo
             echo "Processing Commit: $COMMIT $MESSAGE"
-            if ! process_commit_changes "$COMMIT" "$EXTENSIONS"; then
+            if ! process_commit_changes "$COMMIT" "$EXT_REGEX"; then
               FINAL_EXIT=1
             fi
           done          
