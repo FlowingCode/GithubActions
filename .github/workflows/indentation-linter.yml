@@ -25,6 +25,10 @@ jobs:
         run: |
 
           describe_indent() {
+            echo FOO
+          }
+          
+          describe_indent2() {
             local sig="$1"
             local result=""
             local i=0
