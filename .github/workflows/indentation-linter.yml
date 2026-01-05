@@ -25,7 +25,7 @@ jobs:
         run: |
 
           describe_indent() {
-            local sig="$1"
+            local sig="$*"
             echo FOO$sig | tr ' \t' 'ST'
           }
           
