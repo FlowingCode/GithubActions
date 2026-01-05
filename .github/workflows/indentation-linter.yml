@@ -40,9 +40,9 @@ jobs:
                   ((i++))
                 done
                 local s_suffix=$([[ $count -ne 1 ]] && echo "s")
-                result+="${result:+ }<$count space$s_suffix>"
+                result+="${result:+ }!$count space$s_suffix!"
               elif [[ "$char" == $'\t' ]]; then
-                result+="${result:+ }<TAB>"
+                result+="${result:+ }!TAB!"
                 ((i++))
               else
                 # Fallback for unexpected characters
