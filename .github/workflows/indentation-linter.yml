@@ -24,12 +24,12 @@ jobs:
         shell: bash
         run: |
 
-          describe_indent() {
+          describe_indent2() {
             local sig="$*"
             echo FOO$sig | tr ' \t' 'ST'
           }
           
-          describe_indent2() {
+          describe_indent() {
             local sig="$1"
             local result=""
             local i=0
@@ -167,13 +167,13 @@ jobs:
               if [[ "$line" =~ ^([ $'\t']+) ]]; then
                 local current_sig="${BASH_REMATCH[1]}"
                 if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$current_sig" == *$'\t'* ]]; then
-                  local desc=$(describe_indent "$new_sig")
+                  local desc=$(describe_indent "$current_sig")
                   echo "::error file=$file,line=$line_num::Tabs are forbidden in new files of this type ($file). Found: $desc"
                   STATUS=1
                 elif is_consistent "$current_sig" approved_prefixes; then
                   approved_prefixes["$current_sig"]=1
                 else
-                  local desc=$(describe_indent "$new_sig")
+                  local desc=$(describe_indent "$current_sig")
                   echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $desc"
                   STATUS=1
                 fi
