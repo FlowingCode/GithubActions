@@ -23,11 +23,6 @@ jobs:
       - name: Commit Processor
         shell: bash
         run: |
-
-          describe_indent2() {
-            local sig="$*"
-            echo FOO$sig | tr ' \t' 'ST'
-          }
           
           describe_indent() {
             local sig="$1"
@@ -44,10 +39,13 @@ jobs:
                   ((count++))
                   ((i++))
                 done
-                local s_suffix=$([[ $count -ne 1 ]] && echo "s")
-                result+="${result:+ }!$count space$s_suffix!"
+                if [[ $count -eq 1 ]]; then
+                  result+="${result:+ }<SPACE>"
+                else
+                  result+="${result:+ }<$count SPACES>"
+                fi
               elif [[ "$char" == $'\t' ]]; then
-                result+="${result:+ }!TAB!"
+                result+="${result:+ }<TAB>"
                 ((i++))
               else
                 # Fallback for unexpected characters
