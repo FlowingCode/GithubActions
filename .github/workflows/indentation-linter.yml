@@ -24,6 +24,35 @@ jobs:
         shell: bash
         run: |
 
+          describe_indent() {
+            local sig="$1"
+            local result=""
+            local i=0
+  
+            while (( i < ${#sig} )); do
+              local char="${sig:$i:1}"
+    
+              if [[ "$char" == " " ]]; then
+                local count=0
+                # Count consecutive spaces
+                while [[ "${sig:$i:1}" == " " ]]; do
+                  ((count++))
+                  ((i++))
+                done
+                local s_suffix=$([[ $count -ne 1 ]] && echo "s")
+                result+="${result:+ }<$count space$s_suffix>"
+              elif [[ "$char" == $'\t' ]]; then
+                result+="${result:+ }<TAB>"
+                ((i++))
+              else
+                # Fallback for unexpected characters
+                result+="?"
+                ((i++))
+              fi
+            done
+            echo "$result"
+          }
+
           # Load file content from a specific git object into a Bash array
           load_file_to_array() {
             local commit="$1"
@@ -36,7 +65,7 @@ jobs:
           load_prefixes() {
             local commit="$1"
             local file="$2"
-            local -n ref_array=$3
+            local -n ref_map=$3
             
             # Extract all leading whitespace, sort them, and keep unique ones
             while read -r prefix; do
@@ -98,10 +127,12 @@ jobs:
                 if [[ "$line_content" =~ ^([ $'\t']+) ]]; then
                   local new_sig="${BASH_REMATCH[1]}"
                   if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$new_sig" == *$'\t'* ]]; then
-                    echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden because this file has a clean space-only history."
+                    local desc=$(describe_indent "$new_sig")
+                    echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden because this file has a clean space-only format. Found: $desc."
                     STATUS=1
                   elif [[ -z "${approved_prefixes["$new_sig"]}" ]]; then
-                    echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $(echo -n "$new_sig" | tr ' \t' 'ST')"
+                    local desc=$(describe_indent "$new_sig")
+                    echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $desc"
                     STATUS=1
                   fi
                 fi
@@ -114,7 +145,12 @@ jobs:
             local commit=$1
             local file=$2
             local STATUS=0
-              
+
+            local ENFORCE_STRICT_SPACES=false
+            if [[ "$file" =~ $SPACE_ONLY_EXT_REGEX ]]; then
+              ENFORCE_STRICT_SPACES=true
+            fi
+            
             declare -A approved_prefixes
 
             local -a file_lines
@@ -125,10 +161,15 @@ jobs:
               ((line_num++))
               if [[ "$line" =~ ^([ $'\t']+) ]]; then
                 local current_sig="${BASH_REMATCH[1]}"
-                if is_consistent "$current_sig" approved_prefixes; then
+                if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$current_sig" == *$'\t'* ]]; then
+                  local desc=$(describe_indent "$new_sig")
+                  echo "::error file=$file,line=$line_num::Tabs are forbidden in new files of this type ($file). Found: $desc"
+                  STATUS=1
+                elif is_consistent "$current_sig" approved_prefixes; then
                   approved_prefixes["$current_sig"]=1
                 else
-                  echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $(echo -n "$current_sig" | tr ' \t' 'ST')"
+                  local desc=$(describe_indent "$new_sig")
+                  echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $desc"
                   STATUS=1
                 fi
               fi
