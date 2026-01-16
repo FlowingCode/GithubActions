@@ -133,7 +133,7 @@ jobs:
                     local desc=$(describe_indent "$new_sig")
                     echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden because this file has a clean space-only format. Found: $desc."
                     STATUS=1
-                  elif [[ -z "${approved_prefixes["$new_sig"]}" ]]; then
+                  elif ! is_consistent "$new_sig" approved_prefixes; then
                     local desc=$(describe_indent "$new_sig")
                     echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $desc"
                     STATUS=1
