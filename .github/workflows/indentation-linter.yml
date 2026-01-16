@@ -9,6 +9,11 @@ on:
         required: false
         type: string
         default: '*'
+      config:
+        description: 'JSON configuration for indentation rules per extension (e.g., {"java": {"type": "space"}, "go": {"type": "tab"}})'
+        required: false
+        type: string
+        default: '{}'
         
 jobs:
   indentation-linter:
@@ -54,6 +59,16 @@ jobs:
               fi
             done
             echo "$result"
+          }
+
+          # Get required indentation type for a file extension from config
+          get_indentation_type() {
+            local filepath="$1"
+            local ext="${filepath##*.}"
+            
+            # Use jq to extract the type for this extension
+            local type=$(echo "$CONFIG_JSON" | jq -r --arg ext "$ext" '.[$ext].type // ""' 2>/dev/null)
+            echo "$type"
           }
 
           # Load file content from a specific git object into a Bash array
@@ -105,12 +120,21 @@ jobs:
             declare -A approved_prefixes            
             load_prefixes "$PARENT" "$OLD_FILE" approved_prefixes
 
-            local ENFORCE_STRICT_SPACES=false
-            if [[ "$NEW_FILE" =~ $SPACE_ONLY_EXT_REGEX ]]; then
-              ENFORCE_STRICT_SPACES=true
+            local REQUIRED_TYPE=$(get_indentation_type "$NEW_FILE")
+            local ENFORCE_TYPE=false
+            local TYPE_NAME=""
+            
+            if [[ -n "$REQUIRED_TYPE" ]]; then
+              ENFORCE_TYPE=true
+              TYPE_NAME="$REQUIRED_TYPE"
+              
+              # Check if existing prefixes already violate the rule 
               for prefix in "${!approved_prefixes[@]}"; do
-                if [[ "$prefix" == *$'\t'* ]]; then
-                  ENFORCE_STRICT_SPACES=false
+                if [[ "$REQUIRED_TYPE" == "space" && "$prefix" == *$'\t'* ]]; then
+                  ENFORCE_TYPE=false
+                  break
+                elif [[ "$REQUIRED_TYPE" == "tab" && "$prefix" == *" "* ]]; then
+                  ENFORCE_TYPE=false
                   break
                 fi
               done
@@ -129,11 +153,18 @@ jobs:
                 local line_content="${file_lines[$((i-1))]}"
                 if [[ "$line_content" =~ ^([ $'\t']+) ]]; then
                   local new_sig="${BASH_REMATCH[1]}"
-                  if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$new_sig" == *$'\t'* ]]; then
-                    local desc=$(describe_indent "$new_sig")
-                    echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden because this file has a clean space-only format. Found: $desc."
-                    STATUS=1
-                  elif ! is_consistent "$new_sig" approved_prefixes; then
+                  if [ "$ENFORCE_TYPE" = true ]; then
+                    if [[ "$REQUIRED_TYPE" == "space" && "$new_sig" == *$'\t'* ]]; then
+                      local desc=$(describe_indent "$new_sig")
+                      echo "::error file=$NEW_FILE,line=$i::Tabs are forbidden for .$TYPE_NAME files. Found: $desc"
+                      STATUS=1
+                    elif [[ "$REQUIRED_TYPE" == "tab" && "$new_sig" == *" "* ]]; then
+                      local desc=$(describe_indent "$new_sig")
+                      echo "::error file=$NEW_FILE,line=$i::Spaces are forbidden for .$TYPE_NAME files. Found: $desc"
+                      STATUS=1
+                    fi
+                  fi
+                  if ! is_consistent "$new_sig" approved_prefixes; then
                     local desc=$(describe_indent "$new_sig")
                     echo "::error file=$NEW_FILE,line=$i::Indentation sequence not allowed: $desc"
                     STATUS=1
@@ -149,10 +180,8 @@ jobs:
             local file=$2
             local STATUS=0
 
-            local ENFORCE_STRICT_SPACES=false
-            if [[ "$file" =~ $SPACE_ONLY_EXT_REGEX ]]; then
-              ENFORCE_STRICT_SPACES=true
-            fi
+            local REQUIRED_TYPE=$(get_indentation_type "$file")
+            local TYPE_NAME="$REQUIRED_TYPE"
             
             declare -A approved_prefixes
 
@@ -164,16 +193,25 @@ jobs:
               ((line_num++))
               if [[ "$line" =~ ^([ $'\t']+) ]]; then
                 local current_sig="${BASH_REMATCH[1]}"
-                if [ "$ENFORCE_STRICT_SPACES" = true ] && [[ "$current_sig" == *$'\t'* ]]; then
-                  local desc=$(describe_indent "$current_sig")
-                  echo "::error file=$file,line=$line_num::Tabs are forbidden in new files of this type ($file). Found: $desc"
-                  STATUS=1
-                elif is_consistent "$current_sig" approved_prefixes; then
-                  approved_prefixes["$current_sig"]=1
-                else
-                  local desc=$(describe_indent "$current_sig")
-                  echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $desc"
-                  STATUS=1
+                if [[ -n "$REQUIRED_TYPE" ]]; then
+                  if [[ "$REQUIRED_TYPE" == "space" && "$current_sig" == *$'\t'* ]]; then
+                    local desc=$(describe_indent "$current_sig")
+                    echo "::error file=$file,line=$line_num::Tabs are forbidden for .$TYPE_NAME files. Found: $desc"
+                    STATUS=1
+                  elif [[ "$REQUIRED_TYPE" == "tab" && "$current_sig" == *" "* ]]; then
+                    local desc=$(describe_indent "$current_sig")
+                    echo "::error file=$file,line=$line_num::Spaces are forbidden for .$TYPE_NAME files. Found: $desc"
+                    STATUS=1
+                  fi
+                fi
+                if [[ $STATUS -eq 0 ]]; then
+                  if is_consistent "$current_sig" approved_prefixes; then
+                    approved_prefixes["$current_sig"]=1
+                  else
+                    local desc=$(describe_indent "$current_sig")
+                    echo "::error file=$file,line=$line_num::Inconsistent indentation in new file: $desc"
+                    STATUS=1
+                  fi
                 fi
               fi
             done
@@ -230,7 +268,7 @@ jobs:
             EXT_REGEX="\.($FORMATTED_EXT)$"
           fi
 
-          SPACE_ONLY_EXT_REGEX='\.java$'
+          CONFIG_JSON='${{ inputs.config }}'
           
           echo "----------------------------------------------------"
           for COMMIT in $COMMITS; do
