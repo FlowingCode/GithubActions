@@ -16,7 +16,10 @@ jobs:
     - uses: FlowingCode/action-conventional-commits@master
     
     - name: Get version
-      run: echo "VERSION=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml")" >> $GITHUB_ENV && cat $GITHUB_ENV | grep VERSION=
+      run: |
+        VERSION=$(xmllint --xpath "/*[local-name()='project']/*[local-name()='version']/text()" pom.xml 2>/dev/null)
+        if [ -z "$VERSION" ]; then VERSION=$(xmllint --xpath "/*[local-name()='project']/*[local-name()='parent']/*[local-name()='version']/text()" pom.xml); fi
+        echo "VERSION=$VERSION" >> $GITHUB_ENV && cat $GITHUB_ENV | grep VERSION=
     
     - name: Check snapshot version
       if: ${{ !endsWith( env.VERSION , '-SNAPSHOT' ) }}
