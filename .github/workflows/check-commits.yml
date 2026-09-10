@@ -16,11 +16,12 @@ jobs:
     
     - uses: actions/checkout@v3
     
+    # TODO revert to @master before merging (fail-on-wip is not on master yet)
     # The action only analyses the commit messages. Every conclusion, message and
     # annotation is produced by the step below, so that the wording and the policy live
     # here and not in a compiled bundle.
     - id: commits
-      uses: FlowingCode/action-conventional-commits@master
+      uses: FlowingCode/action-conventional-commits@feature/wip-action-required
       with:
         enforce: false
 
