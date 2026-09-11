@@ -9,29 +9,210 @@ on:
 jobs:
   check-commits:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
     
     - uses: actions/checkout@v3
     
-    - uses: FlowingCode/action-conventional-commits@master
-    
+    # TODO revert to @master before merging (fail-on-wip is not on master yet)
+    # The action only analyses the commit messages. Every conclusion, message and
+    # annotation is produced by the step below, so that the wording and the policy live
+    # here and not in a compiled bundle.
+    - id: commits
+      uses: FlowingCode/action-conventional-commits@feature/wip-action-required
+      with:
+        enforce: false
+
+    # Reading the version does not depend on the commit check, and the semver
+    # alignment must be reported even when the commit check failed.
     - name: Get version
-      run: echo "VERSION=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml")" >> $GITHUB_ENV && cat $GITHUB_ENV | grep VERSION=
-    
-    - name: Check snapshot version
-      if: ${{ !endsWith( env.VERSION , '-SNAPSHOT' ) }}
-      uses: actions/github-script@v3
-      with: 
-          script: core.setFailed('Version is not SNAPSHOT')
-    
-    - name: Fail on required major version
-      if: ${{ fromJSON(env.SEMVER_LEVEL)==3 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0.0-SNAPSHOT' ) }}
-      uses: actions/github-script@v6
-      with: 
-          script: core.setFailed("Version ${{ env.VERSION }} cannot contain breaking changes.")
-          
-    - name: Fail on required minor version
-      if: ${{ fromJSON(env.SEMVER_LEVEL)==2 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0-SNAPSHOT' ) }}
-      uses: actions/github-script@v6
-      with: 
-          script: core.setFailed("Version ${{ env.VERSION }} cannot contain new features")
+      id: version
+      if: always()
+      run: echo "version=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml" || true)" >> $GITHUB_OUTPUT
+
+    # The check run that GitHub creates for this job cannot carry a message: its
+    # conclusion is derived from the job outcome and its output is empty, so the pull
+    # request page would show a failing check without saying why. These check runs are
+    # created here instead, and they carry both the verdict and the detail.
+    - name: Report commit message checks
+      if: always()
+      uses: actions/github-script@v7
+      env:
+        # Passed through the environment rather than interpolated into the script:
+        # commit messages are untrusted input.
+        RESULTS: ${{ steps.commits.outputs.results }}
+        # SEMVER_LEVEL is exported by the action into the environment of the steps that
+        # follow it, so it needs no mapping here. The action only fails when the commit
+        # messages could not be retrieved, which is the one case where nothing was
+        # analysed and an empty result says nothing about the commits.
+        COMMITS_OUTCOME: ${{ steps.commits.outcome }}
+        VERSION: ${{ steps.version.outputs.version }}
+      with:
+        script: |
+          const guidelines =
+            'https://github.com/FlowingCode/DevelopmentConventions/blob/main/conventional-commits.md';
+          // Check runs attach to any commit, so nothing here is specific to a pull
+          // request: on other events the checks are reported for the pushed commit.
+          const sha = context.payload.pull_request?.head?.sha ?? context.sha;
+          // A pull request from a fork runs with a read-only token, whatever the
+          // permissions block asks for, so checks.create answers 403 there.
+          const pr = context.payload.pull_request;
+          const fromFork = !!pr && pr.head.repo.full_name !== pr.base.repo.full_name;
+          const results = JSON.parse(process.env.RESULTS || '[]');
+          const invalid = results.filter((r) => r.level === 'invalid');
+          const wip = results.filter((r) => r.level === 'wip');
+          const nonWip = results.filter((r) => r.level !== 'wip');
+
+          // Squash and Merge stands in for a manual consolidation by the author if, and
+          // only if, the history is exactly one non-WIP commit followed by WIP commits:
+          // collapsing the branch then yields the commit the author would have produced.
+          // Any other shape — several non-WIP commits, a branch that opens with a WIP
+          // commit, or nothing but WIP commits — has to be consolidated by the author,
+          // because there is no single commit for the WIP ones to be squashed into.
+          const squashable = nonWip.length === 1 && results[0]?.level !== 'wip';
+          const wipCount = wip.length === 1
+            ? '1 Work-in-Progress (WIP) commit'
+            : `${wip.length} Work-in-Progress (WIP) commits`;
+          const wipNoun = wip.length === 1 ? 'WIP commit' : 'WIP commits';
+
+          // File-less annotations are only possible through workflow commands, so they
+          // are emitted here. They attach to the check run of this job.
+          for (const r of invalid) core.error(`${r.sha ? r.sha.substring(0, 7) + ' ' : ''}${r.header} : ${r.reason}`);
+          if (wip.length) {
+            const found = wip.length === 1
+              ? 'A Work-in-Progress (WIP) commit was found'
+              : `${wip.length} Work-in-Progress (WIP) commits were found`;
+            core.warning(
+              squashable
+                ? `\u{1F6A7} ${found}. The branch can be squashed on merge, so the author does not need to consolidate it.`
+                : `\u{1F6A7} ${found}. ${wip.length === 1 ? 'It' : 'They'} must be consolidated by the author before merging.`,
+            );
+          }
+
+          // Skipped rather than attempted on a fork: the annotations above are workflow
+          // commands and still work, and the job still fails, so the outcome is reported
+          // either way — only the checks that carry it separately are missing.
+          const create = (name, conclusion, title, summary) =>
+            fromFork
+              ? Promise.resolve()
+              : github.rest.checks.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  head_sha: sha,
+                  status: 'completed',
+                  conclusion,
+                  details_url: guidelines,
+                  output: { title, summary },
+                });
+
+          const LEVELS = ['NONE', 'PATCH', 'MINOR', 'MAJOR'];
+          const analysed = process.env.COMMITS_OUTCOME !== 'failure';
+          // Only a valid commit raises the level, so NONE is also what an analysis that
+          // could not parse a single commit message leaves behind. That is an unknown
+          // level rather than a NONE one, and the version cannot be verified against it.
+          const levelKnown =
+            !!process.env.SEMVER_LEVEL && results.some((r) => r.level !== 'invalid');
+          const level = Number(process.env.SEMVER_LEVEL);
+          const version = process.env.VERSION || '';
+          const zero = version.startsWith('0.');
+
+          let semver;
+          if (!analysed) {
+            semver = ['neutral', 'The commit messages were not analysed',
+              'The semantic versioning level is unknown, so the version was not verified.'];
+          } else if (!levelKnown) {
+            semver = ['neutral', 'The semantic versioning level is unknown',
+              'No commit message could be parsed, so the level of change described by this '
+                + 'pull request is undetermined and the version was not verified.'];
+          } else if (!version) {
+            semver = ['neutral', 'No project version found in pom.xml',
+              'The version could not be read from pom.xml, so it was not verified.'];
+          } else if (!version.endsWith('-SNAPSHOT')) {
+            semver = ['failure', `🚫 Version ${version} is not a SNAPSHOT`,
+              'The version in pom.xml must be a SNAPSHOT.'];
+          } else if (level === 3 && !zero && !version.endsWith('.0.0-SNAPSHOT')) {
+            semver = ['failure', `🚫 Version ${version} contains breaking changes`,
+              'Breaking changes must target a new MAJOR version (x.0.0).'];
+          } else if (level === 2 && !zero && !version.endsWith('.0-SNAPSHOT')) {
+            semver = ['failure', `🚫 Version ${version} contains new features`,
+              'New features and deprecations must target a new MINOR version (x.y.0).'];
+          } else {
+            semver = ['success', `Version ${version} is consistent with a ${LEVELS[level]} change`,
+              `The commit messages in this pull request describe a ${LEVELS[level]} change.`];
+          }
+
+          await create('semver-alignment', semver[0], semver[1], semver[2]);
+
+          // An empty result is not evidence of consolidated commits when nothing was
+          // analysed, so this check is reported as unknown rather than as a success.
+          let wipCheck;
+          if (!analysed) {
+            wipCheck = ['neutral', 'The commit messages were not analysed',
+              'The commit messages could not be retrieved, so the commits were not verified.'];
+          } else if (wip.length && squashable) {
+            // Kept short: a check run title is truncated in the list on the pull
+            // request, so the detail belongs in the summary rather than the title.
+            wipCheck = ['action_required', `\u{1F6A7} Must squash ${wipNoun}`,
+              [
+                `This branch is one non-WIP commit followed by ${wipCount.replace(/^1 /, 'a ')},`
+                  + ' so it can be collapsed at merge time instead of being consolidated by'
+                  + ' the author.',
+                '',
+                'Merge it with **Squash and Merge**, and edit the final commit message to be'
+                  + ' descriptive before finalizing. If the author communicated a final commit'
+                  + ' message, use theirs.',
+                '',
+                '| Commit |',
+                '|---|',
+                wip.map((r) => `| \`${r.header}\` |`).join('\n'),
+              ].join('\n')];
+          } else if (wip.length) {
+            wipCheck = ['failure', `\u{1F6A7} Must consolidate ${wipNoun}`,
+              [
+                nonWip.length === 0
+                  ? 'Every commit in this branch is a WIP commit, so there is no commit for'
+                    + ' them to be squashed into.'
+                  : nonWip.length === 1
+                    ? 'This branch opens with a WIP commit, so it is not one non-WIP commit'
+                      + ' followed by WIP commits.'
+                    : `This branch has ${nonWip.length} non-WIP commits, so collapsing it at`
+                      + ' merge time would lose the distinction between them.',
+                '',
+                'The author must consolidate it with an interactive rebase, squashing each WIP'
+                  + ' commit into the commit it belongs to, and force-push the branch.',
+                '',
+                '| Commit |',
+                '|---|',
+                wip.map((r) => `| \`${r.header}\` |`).join('\n'),
+              ].join('\n')];
+          } else {
+            wipCheck = ['success', 'No Work-in-Progress (WIP) commits',
+              'All the commits in this pull request are consolidated.'];
+          }
+
+          await create('wip-commits', wipCheck[0], wipCheck[1], wipCheck[2]);
+
+          // The job fails if any of the checks above failed, so that the pull request
+          // is marked as failing; the checks themselves say which one it was.
+          const failed = [];
+          if (invalid.length) {
+            failed.push(
+              invalid.length === 1
+                ? '1 commit message does not follow the guidelines'
+                : `${invalid.length} commit messages do not follow the guidelines`,
+            );
+          }
+          if (wip.length) {
+            failed.push(
+              `${wipCount} must be ${squashable ? 'squashed on merge' : 'consolidated by the author'}`,
+            );
+          }
+          if (semver[0] === 'failure') {
+            failed.push(semver[1]);
+          }
+          if (failed.length) {
+            core.setFailed(failed.join(' — '));
+          }
