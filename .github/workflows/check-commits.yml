@@ -21,26 +21,12 @@ jobs:
       with:
         enforce: false
 
+    # Reading the version does not depend on the commit check, and the semver
+    # alignment must be reported even when the commit check failed.
     - name: Get version
-      run: echo "VERSION=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml")" >> $GITHUB_ENV && cat $GITHUB_ENV | grep VERSION=
-    
-    - name: Check snapshot version
-      if: ${{ !endsWith( env.VERSION , '-SNAPSHOT' ) }}
-      uses: actions/github-script@v3
-      with: 
-          script: core.setFailed('Version is not SNAPSHOT')
-    
-    - name: Fail on required major version
-      if: ${{ fromJSON(env.SEMVER_LEVEL)==3 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0.0-SNAPSHOT' ) }}
-      uses: actions/github-script@v6
-      with: 
-          script: core.setFailed("Version ${{ env.VERSION }} cannot contain breaking changes.")
-          
-    - name: Fail on required minor version
-      if: ${{ fromJSON(env.SEMVER_LEVEL)==2 && !startsWith( env.VERSION, '0.' ) && !endsWith( env.VERSION, '.0-SNAPSHOT' ) }}
-      uses: actions/github-script@v6
-      with: 
-          script: core.setFailed("Version ${{ env.VERSION }} cannot contain new features")
+      id: version
+      if: always()
+      run: echo "version=$(grep -oPm1 "(?<=<version>)[^<]+" "pom.xml" || true)" >> $GITHUB_OUTPUT
 
     # The check run that GitHub creates for this job cannot carry a message: its
     # conclusion is derived from the job outcome and its output is empty, so the pull
@@ -53,6 +39,12 @@ jobs:
         # Passed through the environment rather than interpolated into the script:
         # commit messages are untrusted input.
         RESULTS: ${{ steps.commits.outputs.results }}
+        # SEMVER_LEVEL is exported by the action into the environment of the steps that
+        # follow it, so it needs no mapping here. The action only fails when the commit
+        # messages could not be retrieved, which is the one case where nothing was
+        # analysed and an empty result says nothing about the commits.
+        COMMITS_OUTCOME: ${{ steps.commits.outcome }}
+        VERSION: ${{ steps.version.outputs.version }}
       with:
         script: |
           const guidelines =
@@ -142,13 +134,68 @@ jobs:
             }
           };
 
-          // Kept short: a check run title is truncated in the list on the pull request,
-          // so the detail belongs in the summary rather than in the title.
+          const LEVELS = ['NONE', 'PATCH', 'MINOR', 'MAJOR'];
+          // Anything other than success means the commits were not read: the step fails when
+          // they cannot be retrieved, and is skipped or cancelled when an earlier step failed or
+          // the run was cancelled. Those leave an empty results, which must not be reported as a
+          // pull request with nothing to find.
+          const analysed = process.env.COMMITS_OUTCOME === 'success';
+          // Only a commit that settles a level raises it, so a commit message that could not
+          // be parsed leaves the level a lower bound rather than a determination: that commit
+          // might have described a breaking change. A lower bound can only be too low, so it is
+          // still enough to fail a version that the commits already outgrew; it is not enough to
+          // call a version consistent. Hence this is tested after the version checks and not
+          // before them.
+          //
+          // A WIP commit is deliberately not part of this. It must not affect the level at all —
+          // neither raise it, nor render it unknown — because it is going to be squashed into a
+          // commit whose own type settles the level.
+          const levelKnown = !!process.env.SEMVER_LEVEL && invalid.length === 0;
+          const level = Number(process.env.SEMVER_LEVEL);
+          const version = process.env.VERSION || '';
+          const zero = version.startsWith('0.');
+
+          let semver;
+          if (!analysed) {
+            semver = ['neutral', 'The commit messages were not analysed',
+              'The semantic versioning level is unknown, so the version was not verified.'];
+          } else if (!version) {
+            semver = ['neutral', 'No project version found in pom.xml',
+              'The version could not be read from pom.xml, so it was not verified.'];
+          } else if (!version.endsWith('-SNAPSHOT')) {
+            semver = ['failure', `🚫 Version ${version} is not a SNAPSHOT`,
+              'The version in pom.xml must be a SNAPSHOT.'];
+          } else if (level === 3 && !zero && !version.endsWith('.0.0-SNAPSHOT')) {
+            semver = ['failure', '🚫 MAJOR version required',
+              `Version ${version} contains breaking changes. Breaking changes must target a `
+                + 'new MAJOR version (x.0.0).'];
+          } else if (level === 2 && !zero && !version.endsWith('.0-SNAPSHOT')) {
+            semver = ['failure', '🚫 MINOR version required',
+              `Version ${version} contains new features. New features and deprecations must `
+                + 'target a new MINOR version (x.y.0).'];
+          } else if (!levelKnown) {
+            semver = ['neutral', 'The semantic versioning level is unknown',
+              'The level of change described by this pull request is undetermined, because a '
+                + 'commit message could not be parsed. The version was not verified.'];
+          } else {
+            semver = ['success', `Consistent: ${LEVELS[level]} change`,
+              `Version ${version} is consistent with a ${LEVELS[level]} change, which is what `
+                + 'the commit messages in this pull request describe.'];
+          }
+
+          const [semverConclusion, semverTitle, semverSummary] = semver;
+          await create('semver-alignment', semverConclusion, semverTitle, semverSummary);
+
+          // An empty result is not evidence of consolidated commits when nothing was
+          // analysed, so this check is reported as unknown rather than as a success.
           let wipCheck;
-          if (!wip.length) {
-            wipCheck = ['success', 'No Work-in-Progress (WIP) commits',
-              'All the commits in this pull request are consolidated.'];
-          } else if (squashable) {
+          if (!analysed) {
+            wipCheck = ['neutral', 'The commit messages were not analysed',
+              'The step that analyses the commit messages did not complete, so the commits '
+                + 'were not verified.'];
+          } else if (wip.length && squashable) {
+            // Kept short: a check run title is truncated in the list on the pull
+            // request, so the detail belongs in the summary rather than the title.
             wipCheck = ['action_required', `\u{1F6A7} Must squash ${wipNoun}`,
               [
                 `This branch is one non-WIP commit followed by ${wipCount.replace(/^1 /, 'a ')},`
@@ -163,7 +210,7 @@ jobs:
                 '|---|',
                 wip.map((r) => `| ${codeCell(r.header)} |`).join('\n'),
               ].join('\n')];
-          } else {
+          } else if (wip.length) {
             wipCheck = ['failure', `\u{1F6A7} Must consolidate ${wipNoun}`,
               [
                 nonWip.length === 0
@@ -182,9 +229,13 @@ jobs:
                 '|---|',
                 wip.map((r) => `| ${codeCell(r.header)} |`).join('\n'),
               ].join('\n')];
+          } else {
+            wipCheck = ['success', 'No Work-in-Progress (WIP) commits',
+              'All the commits in this pull request are consolidated.'];
           }
 
-          await create('wip-commits', wipCheck[0], wipCheck[1], wipCheck[2]);
+          const [wipConclusion, wipTitle, wipSummary] = wipCheck;
+          await create('wip-commits', wipConclusion, wipTitle, wipSummary);
 
           // The job fails if any of the checks above failed, so that the pull request
           // is marked as failing; the checks themselves say which one it was.
@@ -200,6 +251,9 @@ jobs:
             failed.push(
               `${wipCount} must be ${squashable ? 'squashed on merge' : 'consolidated by the author'}`,
             );
+          }
+          if (semverConclusion === 'failure') {
+            failed.push(semverTitle);
           }
           // Only worth failing over when a check run was carrying a verdict. With nothing
           // found, its absence withholds nothing, and failing here would mark a pull request
