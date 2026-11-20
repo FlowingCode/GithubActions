@@ -1,0 +1,151 @@
+#Release a Maven project with maven-release-plugin and stage it on the Sonatype
+#Central Portal.
+#
+#Run it from the branch to release ("Use workflow from" in the Run workflow
+#dialog). release:prepare pushes the release commits and the tag to that branch,
+#and release:perform builds the tag and uploads it to the Central Portal, where
+#the deployment waits to be published by hand.
+#
+#The commits are pushed with GITHUB_TOKEN, which does not trigger other workflows.
+#To deploy the snapshot of the next development version, the caller adds a job that
+#`needs` this one and calls maven-snapshot.yml with `ref: ${{ github.ref }}`.
+#
+#The job runs in the caller repository's `release` environment. Configure that
+#environment with required reviewers (a team of organization members) so that only
+#organization members can let a release run.
+#
+#Required secrets (organization or repository):
+#  CENTRAL_USERNAME, CENTRAL_TOKEN   Central Portal user token
+#  MAVEN_GPG_KEY                     ASCII-armored secret key used to sign
+#  MAVEN_GPG_PASSPHRASE              Passphrase of MAVEN_GPG_KEY
+
+name: Maven Release
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: JDK version used to build (e.g. 17, 21)
+        required: true
+        type: string
+      dry-run:
+        description: Run release:prepare with -DdryRun=true (nothing is pushed or deployed)
+        required: false
+        type: boolean
+        default: false
+      release-version:
+        description: Release version (empty for the default, the current SNAPSHOT without the suffix)
+        required: false
+        type: string
+        default: ''
+      development-version:
+        description: Next development version (empty for the default, the next patch SNAPSHOT)
+        required: false
+        type: string
+        default: ''
+      maven-args:
+        description: Extra Maven arguments (profiles, properties)
+        required: false
+        type: string
+        default: -Pdirectory
+    secrets:
+      CENTRAL_USERNAME:
+        required: true
+      CENTRAL_TOKEN:
+        required: true
+      MAVEN_GPG_KEY:
+        required: true
+      MAVEN_GPG_PASSPHRASE:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    concurrency:
+      group: maven-release-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+
+    - name: Check the ref
+      if: github.ref_type != 'branch'
+      env:
+        REF: ${{ github.ref }}
+      run: |
+        echo "::error::Releases must be run from a branch, not from $REF."
+        exit 1
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.ref }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+        cache: maven
+        # Credentials for the `central` server used by central-publishing-maven-plugin.
+        server-id: central
+        server-username-env-var: CENTRAL_USERNAME
+        server-password-env-var: CENTRAL_TOKEN
+
+    # The poms declare the SCM with ssh:// or git:// URLs. release:prepare pushes to
+    # the developerConnection and release:perform clones from it, so every GitHub URL
+    # form is rewritten to HTTPS with the job token, which is allowed to push.
+    - name: Configure git
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898183+github-actions[bot]@users.noreply.github.com"
+        base="url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf"
+        for prefix in "ssh://git@github.com:/" "ssh://git@github.com/" "git@github.com:" "git://github.com/" "https://github.com/"; do
+          git config --global --add "$base" "$prefix"
+        done
+
+    # Signing uses the Bouncy Castle signer of maven-gpg-plugin (3.2.0+), which reads
+    # the key from MAVEN_GPG_KEY and the passphrase from MAVEN_GPG_PASSPHRASE, so no
+    # gpg keyring is needed. MAVEN_GPG_PASSPHRASE also activates the `gpg` profile.
+    # -Darguments is passed to the builds that release:prepare and release:perform fork.
+    - name: Release
+      env:
+        DRY_RUN: ${{ inputs.dry-run }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        DEVELOPMENT_VERSION: ${{ inputs.development-version }}
+        MAVEN_ARGS_INPUT: ${{ inputs.maven-args }}
+        CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+        CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+        MAVEN_GPG_KEY: ${{ secrets.MAVEN_GPG_KEY }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+      run: |
+        args=(-B -Dresume=false "-Darguments=-Dgpg.signer=bc")
+        if [[ -n "$RELEASE_VERSION" ]]; then
+          args+=("-DreleaseVersion=$RELEASE_VERSION")
+        fi
+        if [[ -n "$DEVELOPMENT_VERSION" ]]; then
+          args+=("-DdevelopmentVersion=$DEVELOPMENT_VERSION")
+        fi
+        # maven-args comes from the caller workflow file, not from the dispatch form,
+        # and is split into words on purpose.
+        read -r -a extra <<< "$MAVEN_ARGS_INPUT"
+        if [[ "$DRY_RUN" == "true" ]]; then
+          mvn "${args[@]}" -DdryRun=true release:prepare "${extra[@]}"
+        else
+          mvn "${args[@]}" release:prepare release:perform "${extra[@]}"
+        fi
+
+    - name: Summary
+      if: success() && !inputs.dry-run
+      run: |
+        tag=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)
+        {
+          echo "### Released ${tag:-the project}"
+          echo
+          echo "The deployment is staged on the Central Portal and must be published by hand:"
+          echo "https://central.sonatype.com/publishing/deployments"
+        } >> "$GITHUB_STEP_SUMMARY"
