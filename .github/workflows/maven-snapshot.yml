@@ -1,0 +1,77 @@
+#Build a Maven project and deploy its SNAPSHOT artifacts to GitHub Packages.
+#
+#The caller decides which branches publish snapshots (its `on.push.branches`) and
+#which JDK each branch builds with. A maintenance branch keeps its own copy of the
+#caller workflow with its own `java-version`, so every branch builds with the JDK
+#it targets.
+#
+#Artifacts are published to https://maven.pkg.github.com/<owner>/<repo>.
+
+name: Maven Snapshot
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: JDK version used to build (e.g. 17, 21)
+        required: true
+        type: string
+      maven-args:
+        description: Extra Maven arguments (profiles, properties)
+        required: false
+        type: string
+        default: -Pdirectory -Pdemo-jar
+      ref:
+        description: >-
+          Ref to build (empty for the commit that triggered the workflow). Pass the
+          branch (github.ref) to build its latest commit, e.g. after a release pushed
+          the next development version.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    # Snapshots of the same branch must not be deployed at the same time, or the
+    # maven-metadata.xml of one run may overwrite the other.
+    concurrency:
+      group: maven-snapshot-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.ref }}
+        persist-credentials: false
+
+    - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+        cache: maven
+        # Credentials for the `github` repository id used below.
+        server-id: github
+        server-username-env-var: GITHUB_ACTOR
+        server-password-env-var: GITHUB_TOKEN
+
+    - name: Check that the version is a SNAPSHOT
+      run: |
+        version=$(mvn -B -q help:evaluate -Dexpression=project.version -DforceStdout)
+        echo "Project version: $version"
+        if [[ "$version" != *-SNAPSHOT ]]; then
+          echo "::error::Version $version is not a SNAPSHOT; refusing to deploy it as a snapshot."
+          exit 1
+        fi
+
+    # The `id::layout::url` form is understood by maven-deploy-plugin 2.x and 3.x.
+    - name: Deploy snapshot
+      run: >-
+        mvn -B clean deploy ${{ inputs.maven-args }}
+        -DaltSnapshotDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
